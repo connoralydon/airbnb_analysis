@@ -1,0 +1,259 @@
+---
+title: "cleaning_code"
+author: "Angela Zhang, Connor Lydon, David Aaron "
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+
+### Where we got the data:
+
+[inspiration on Kaggle](https://www.kaggle.com/dgomonov/new-york-city-airbnb-open-data?select=AB_NYC_2019.csv)
+
+but then we wanted to do Hawaii instead and found where the data was originally found. we took the listings.csv file
+
+[Hawaii data](http://insideairbnb.com/get-the-data.html)
+
+
+```{r setup, include=FALSE}
+rm(list = ls()) #clear working environemnt
+
+library('tidyverse')
+library('knitr')
+library('dplyr')
+library('glmnet')
+library('glmnetUtils')
+library("imputeTS")
+library('ggplot2')
+library('coefplot')
+library('partykit')
+library('rpart')
+library('rpart.plot')
+library('randomForest')
+library('broom')
+library('magrittr')
+library('yardstick')
+library('plotROC')
+library('sentimentr')
+library('data.table')
+
+
+#options(width=70)
+options(scipen = 99)
+#show show, turn on when turning in UOGFNEASOFIERFLKNS RGKLJNRGRS:ROGJSLRKGJNS"RPGIO
+show = TRUE
+
+
+# general rchunk code options
+
+# this sets text to small
+opts_chunk$set(tidy.opts = list(width.wrap = 50),
+               tidy = TRUE,
+               size = "vsmall")
+opts_chunk$set(
+  message = FALSE,
+  warning = FALSE,
+  # "caching" stores objects in code chunks and only rewrites if you change things
+  cache = TRUE,
+  # automatically downloads dependency files
+  autodep = TRUE,
+  #
+  cache.comments = FALSE,
+  #
+  collapse = TRUE,
+  fig.width = 5,
+  fig.height = 4,
+  fig.align = 'center'
+)
+```
+
+# **cleaning**
+
+## importing data
+
+just importing the listings file from the datasets. also there is an optional boolean to show the extra information.
+
+```{r CLEANING importing data}
+listings_raw <- read.csv("datasets/listings.csv")
+
+if (show) {
+  summary(listings_raw)
+  glimpse(listings_raw)
+  dim(listings_raw)
+}
+```
+
+## first round cleaning
+
+the first thing we do is to set all the variables to the proper type. we weren't able to easily parse the pricing data so we did some modifying specifically on that variable. also we created a log_price to help with exponential data, this helps to make the exponential data linear. next we removed the links, 'metadata', and other data that we didn't use. we're not saying it's useless, but this data is far too complex for this analysis. Also some of the variables (amenities) were vectors. We would pull these apart, but they are entered by users, so this data isn't discrete. One of these kinds of variables was property type and one was an island with a lighthouse and a boat! We also pulled out ID. If you want to identify by the id, you can just keep that variable in there. Also we remove has_availability because there were only a couple of rows that had false.
+
+```{r CLEANING first cleaning}
+
+listings_dirty <- listings_raw %>% mutate(host_since = as.Date(host_since),
+                                            host_response_time = as.factor(host_response_time),
+                                            host_acceptance_rate = parse_number(host_acceptance_rate),
+                                            host_is_superhost = as.factor(host_is_superhost),
+                                            host_has_profile_pic = as.factor(host_has_profile_pic),
+                                            host_identity_verified = as.factor(host_identity_verified),
+                                            bathrooms = parse_number(bathrooms_text),
+                                            instant_bookable = as.factor(instant_bookable),
+                                            property_type = as.factor(property_type),
+                                            room_type = as.factor(room_type),
+                                            neighbourhood_group_cleansed = parse_factor(neighbourhood_group_cleansed),
+                                            host_since_days = abs(host_since - Sys.Date())
+                                            )
+
+#running into error of not being able to parse price, so going to use this instead
+listings_dirty$price <- as.numeric(gsub('\\$|,', '', listings_dirty$price))
+listings_dirty <- listings_dirty %>% mutate(log_price = log(price))
+
+listings_dirty <- listings_dirty %>% select(-listing_url,
+                                          -scrape_id,
+                                          -last_scraped,
+                                          -host_url,
+                                          -picture_url,
+                                          -host_id,
+                                          -host_thumbnail_url,
+                                          -host_picture_url,
+                                          -calendar_updated,
+                                          -calendar_last_scraped,
+                                          -license,
+                                          -latitude,
+                                          -longitude,
+                                          -host_name,
+                                          -amenities, 
+                                          -property_type,
+                                          -host_verifications,
+                                          -first_review,
+                                          -neighbourhood_cleansed,
+                                          -neighbourhood,
+                                          -bathrooms_text,
+                                          -host_since,
+                                          -host_location,
+                                          -last_review,
+                                          -host_neighbourhood,
+                                          -id,
+                                          -has_availability,
+                                          -host_response_rate
+                                          )
+```
+
+## diagnosing na's
+
+in this chunk we count the number of na's for each variable. this helps us identify variables that appear too seldom to be useful.
+
+```{r CLEANING diagnosing NAs}
+NA_vec <- c()
+
+for (i in listings_dirty) {
+  x <- sum(is.na(i))
+  NA_vec <- c(NA_vec, x)
+}
+
+NA_df <- data.table('var_names' = names(listings_dirty),
+                    'num_NA' = NA_vec)
+
+if (show)
+  arrange(NA_df, desc(num_NA))
+
+rm(NA_vec, x, i)
+```
+
+## removing na's
+
+this chunk is where we remove most of our na's. the first thing we do is to create a vector holding the columns that have more than 10% null values. that is that 10% of the data for this column is null. then we remove the column by selecting all but these rows. next we drop the rows that have na for the rest of the variables in the NA_df, where we counted our na's. we didn't do all of them, but you can re run the diagnostic chunk and check the remaining na row counts.
+
+```{r CLEANING removing NAs}
+i <- 0
+remove_vec <- c()
+for (i in NA_df$num_NA) {
+  i <- i + 1
+  
+  if (i > nrow(listings_dirty) / 10) {
+    remove_vec <- c(remove_vec, i)
+  }
+}
+
+listings_dirty <- listings_dirty[, -remove_vec]
+
+listings_dirty <-
+  listings_dirty %>% drop_na(beds) %>% drop_na(bathrooms) %>% drop_na(host_listings_count) %>% drop_na(host_acceptance_rate)
+
+rm(remove_vec, i)
+```
+
+## dropping more columns & variables
+
+while looking through the data we noticed that there was an identical row, we checked, it was, we removed. then we check the remaining names of variables to check to see if there are similar ones. 
+
+```{r CLEANING dropping more columns/variables}
+identical(listings_dirty$host_listings_count,
+          listings_dirty$host_total_listings_count)
+listings_dirty <-
+  listings_dirty %>% select(-host_total_listings_count)
+
+if (show)
+  names(listings_dirty)
+```
+
+## correct identification of classes
+
+here we check the classes of all the variables. sometimes they can get mixed up.
+
+```{r CLEANING confirming correct identification of classes}
+class_vector <- sapply(listings_dirty, class)
+if(show) view(class_vector)
+```
+
+## sentiment score
+
+oh man, this took a while (we had ~20k rows, and 4 variables as chars). we tried caching it, but we don't think it works because this is an actual calculation and not a graphics. anyways, we take the mean sentiment of each character cell. the sentiment is done by sentence so we just took the mean. also it is weird because it returns a new data frame, so we need to extract the sentiment. after we do the sentiment for each of the variables we remove the raw text variables because they really don't serve a purpose after we find the sentiment. this has the option eval=false, so it doesn't run the code in knitting because it takes a long time. the cleaned data is provided too. if you don't want to get the sentiment scores, you can just set eval=FALSE and just remove the char variables. name and description are the most influential.
+
+when you are running this to do the sentiment,take out the eval=FALSE, we have it there so we can knit easily and still show the code
+
+```{r CLEANING sentiment score, eval=FALSE} 
+listings_dirty$name_sentiment <-
+  sapply(listings_dirty$name, function(x)
+    mean(sentiment(x)$sentiment))
+
+listings_dirty$description_sentiment <-
+  sapply(listings_dirty$description, function(x)
+    mean(sentiment(x)$sentiment))
+
+listings_dirty$neighborhood_overview_sentiment <-
+  sapply(listings_dirty$neighborhood_overview, function(x)
+    mean(sentiment(x)$sentiment))
+
+listings_dirty$host_about_sentiment <-
+  sapply(listings_dirty$host_about, function(x)
+    mean(sentiment(x)$sentiment))
+
+```
+```{r}
+listings_dirty <- listings_dirty %>% select(-name, -description, -neighborhood_overview, -host_about)
+```
+
+## removing extremely high prices
+
+here the extremely high prices are removed. why? because a $2000/night mansion in the country can't really represent a studio in the city. look, there is a listing that is 25k a night. This step can be skipped, but it helps because seed to seed differences are much higher without this. we start at 1000, which is still pretty expensive, but over 600 listings are over 1000/night.
+
+```{r}
+listings_dirty$price %>% max()
+
+listings_dirty <- listings_dirty[listings_dirty$price < 1000,]
+```
+
+
+## finishing the cleaning
+
+we finish cleaning here by finding the dimensions and then reassigning to a new listings_clean. After that we save the file as listings_clean.csv. we do this because the sentiment takes about an hour on our computers and later we can just load the cleaned data. there isn't a difference in cleaning seed to seed, so recomputing it would be pointless unless we updated the cleaning code.
+
+```{r CLEANING finishing the cleaning}
+if(show) dim(listings_dirty)
+
+listings_clean <- listings_dirty
+write.csv(listings_clean,file = "datasets/listings_clean.csv", row.names = FALSE)
+
+rm(listings_dirty)
+```

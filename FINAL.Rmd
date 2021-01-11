@@ -1,0 +1,451 @@
+---
+title: "final notebook"
+author: "Angela Zhang, Connor Lydon, David Aaron "
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+```{r setup, include=FALSE}
+rm(list = ls()) #clear working environment
+
+library('tidyverse')
+library('knitr')
+library('dplyr') 
+library('glmnet')
+library('glmnetUtils')
+library("imputeTS")
+library('ggplot2')
+library('coefplot')
+library('partykit')
+library('rpart')
+library('rpart.plot')
+library('randomForest')
+library('broom')
+library('magrittr')
+library('yardstick')
+library('plotROC')
+library('sentimentr')
+library('data.table')
+library('randomForestExplainer')
+
+
+#options(width=70)
+options(scipen=99)
+#show show, turn on when turning in 
+show = FALSE
+
+
+# general rchunk code options
+
+# this sets text to small
+opts_chunk$set(tidy.opts=list(width.wrap=50),tidy=TRUE, size = "vsmall")  
+opts_chunk$set(message = FALSE,                                          
+               warning = FALSE,
+               # "caching" stores objects in code chunks and only rewrites if you change things
+               cache = TRUE,                               
+               # automatically downloads dependency files
+               autodep = TRUE,
+               # 
+               cache.comments = FALSE,
+               # 
+               collapse = TRUE,
+               fig.width = 5,  
+               fig.height = 4,
+               fig.align='center')
+```
+
+## loading pre-cleaned data
+
+as stated in the cleaning code, the cleaning takes a long time, so we save and load it separately. after loading we turn what should be factors into factors.
+
+```{r to load pre-cleaned data}
+listings_clean <- read.csv("datasets/listings_clean.csv")
+
+listings_clean <- listings_clean %>% mutate(host_response_time = as.factor(host_response_time),
+                                            host_is_superhost = as.factor(host_is_superhost),
+                                            host_has_profile_pic = as.factor(host_has_profile_pic),
+                                            host_identity_verified = as.factor(host_identity_verified),
+                                            neighbourhood_group_cleansed = as.factor(neighbourhood_group_cleansed),
+                                            room_type = as.factor(room_type),
+                                            instant_bookable = as.factor(instant_bookable),
+                                            )
+
+```
+
+## splitting the data
+
+setting seed and set boolean to show output. we set the split to 80% training
+
+```{r sampling}
+library ('rsample')
+
+# set seed to your own favorite number
+seed = 408
+set.seed(seed)
+
+show = TRUE
+
+train_prop <- 0.80
+listings_split <- initial_split(listings_clean, prop = train_prop)
+listings_train <- training(listings_split)
+listings_test <- testing(listings_split)
+
+rm(listings_split)
+```
+
+
+## linear model (non-log)
+
+making a linear model for price for all variables minus the log_price. we can't have both because they relate to each other and it would be bad to use one to predict for the other. 
+
+```{r linear}
+lm_mod1 <- lm(price ~ . -log_price,
+              data = listings_train)
+
+if(show) summary(lm_mod1)
+```
+
+### lm predictions
+
+make predictions for the linear model for both the training and testing data. then a data frame is made for the results of both prediction sets. these data frames will be the only data frames for the data except for the random forest. 
+
+```{r linear_predictions_results}
+preds_train_lm1 <- predict(lm_mod1, newdata = listings_train)
+preds_test_lm1 <- predict(lm_mod1, newdata = listings_test)
+
+results_train <- data.frame(
+  'lm1_predicted' = preds_train_lm1,
+  'truth' = listings_train$price
+  ) 
+results_test <- data.frame(
+  'lm1_predicted' = preds_test_lm1,
+  'truth' = listings_test$price
+  ) 
+
+rm(preds_train_lm1, preds_test_lm1)
+```
+
+### lm metrics
+
+getting the rmse & r^2 for the testing and training to see if it is under or over-fit. it appears that the linear model is fit pretty well. the R^2 is slightly better in testing, but the RMSe is slighty higher. 
+
+```{r linear_metrics}
+metrics(results_train, lm1_predicted, truth)
+metrics(results_test, lm1_predicted, truth)
+```
+
+### lm plotting truth vs predicted
+
+the plots below show the perfect model, where all points lie on the line. the points show density by how light the hexes get. the models seem to be under predicting the expensive properties. this is why the next model will log these properties to turn an exponential relationship to a linear one. 
+
+```{r linear_plot}
+if(show){
+
+ggplot(data = results_train, aes(x = truth, y = lm1_predicted)) + #train
+       geom_hex() +
+       xlim(0,1000) + ylim(0,1000) +
+       geom_abline(color = "red") + 
+       ggtitle("All Variables Training Linear Model Train: Truth vs Predicted")
+ggplot(data = results_test, aes(x = truth, y = lm1_predicted)) + #test
+       geom_hex() +
+       xlim(0,1000) + ylim(0,1000) +
+       geom_abline(color = "blue") + 
+       ggtitle("All Variables Training Linear Model Test: Truth vs Predicted")
+}
+```
+
+## logged linear model
+
+here we used the log transformed price variable. logging the variable attempts to linearize an exponential variable.  
+
+```{r linear_log} 
+lm_mod1_log <- lm(log_price ~ . -price,
+              data = listings_train)
+
+if(show) summary(lm_mod1_log)
+```
+
+### lm_log predictions
+
+here predictions are made just like the predictions made previously except this time we just add it as a new row to the data frame and exponentiate the data going into it. by using exp() the predictions are in real dollars.
+
+```{r linear_log_predictions_results}
+
+preds_train_lm1_log <- predict(lm_mod1_log, newdata = listings_train) %>% exp()
+preds_test_lm1_log <- predict(lm_mod1_log, newdata = listings_test) %>% exp()
+
+results_train$lm1_log_predicted = preds_train_lm1_log
+
+results_test$lm1_log_predicted = preds_test_lm1_log
+
+rm(preds_train_lm1_log)
+rm(preds_test_lm1_log)
+```
+
+### lm_log metrics
+
+here we see the data is a bit under fit. 
+
+```{r linear_log_metrics}
+metrics(results_train, lm1_log_predicted, truth)
+metrics(results_test, lm1_log_predicted, truth)
+```
+
+### lm_log plotting truth vs predicted
+
+these plots show that the models don't suffer from the same problems where the data is consistently under-predicted, but it does have a higher spread the predictions ar all over the place. if anything, there is a bit of underprediction, but it is nothing like where it is extremely obvious
+
+```{r linear_log_plot}
+if(show){
+
+ggplot(data = results_train, aes(x = truth, y = lm1_log_predicted)) + #train
+       geom_hex() +
+       xlim(0,1000) + ylim(0,1000) +
+       geom_abline(color = "red") + 
+       ggtitle("All Variables Training Linear Log Model Train: Truth vs Predicted")
+ggplot(data = results_test, aes(x = truth, y = lm1_log_predicted)) + #test
+       geom_hex() +
+       xlim(0,1000) + ylim(0,1000) +
+       geom_abline(color = "blue") + 
+       ggtitle("All Variables Training Linear Log Model Test: Truth vs Predicted")
+
+}
+```
+## elastic net (enet) models
+
+in this first chunk we just introduce a useful function to extract the best alpha value.
+
+```{r enet_functions}
+get_alpha <- function(fit) {
+  alpha <- fit$alpha
+  error <- sapply(fit$modlist, 
+                  function(mod) {min(mod$cvm)})
+  alpha[which.min(error)]
+}
+```
+
+### enet model
+
+here we make an elastic net model with varying alpha levels. we went through 20 steps between 0 and 1. if we did 10 then it just said to do a lasso model. when we tried a larger number it said to do an alpha right over 0. we suspect that this is because the regularization wants a way to bump a few highly un-useful variables while keeping the rest. in the minlossplot, though slight, you can see that 0.05 is the minimum. after we decided on our alpha we made a new enet model with that alpha level. the amount of variables gets reduced from 51 to 41, so this affirms that even with a mostly ridge model, the alpha value above zero allows for some zeroing of variables.
+
+```{r enet_model}
+enet_mod <- cva.glmnet(log_price ~ . -price,
+                       data = listings_train,
+                       alpha = seq(0,1, by = 0.05))
+if(show) print(enet_mod)
+
+if(show) minlossplot(enet_mod, cv.type = "min")
+
+best_alpha <- get_alpha(enet_mod) #alpha = 1, lasso
+                                    #alpha = 0, ridge
+
+best_enet_mod <- cv.glmnet(log_price ~ . - price,
+                           data = listings_train,
+                           alpha = best_alpha)
+
+if(show) {
+  plot(best_enet_mod)
+  coefpath(best_enet_mod)
+}
+```
+
+### enet predictions
+
+here we make predicitons. because we are using log we exp() the prices when we predict them. we also use the lambda1se to do some regularization. 
+
+```{r enet_predictions_results}
+dfT <- listings_train
+preds_train_enet <- predict(best_enet_mod, s = best_enet_mod$lambda.1se, newdata = dfT) %>% exp() %>% as.vector() 
+
+preds_test_enet <- predict(best_enet_mod, s = best_enet_mod$lambda.1se, listings_test, type = "response") %>% exp() %>% as.vector()
+
+results_train$enet_predicted = preds_train_enet
+
+results_test$enet_predicted = preds_test_enet
+
+rm(preds_train_enet)
+rm(preds_test_enet)
+```
+
+### enet metrics
+
+here we see that the data still looks slightly over-fit. both the rmse and r^2 jump when the test data is used. the error rates are nearly identical to the lm_log model. 
+
+```{r enet_metrics}
+metrics(results_train, enet_predicted, truth)
+metrics(results_test, enet_predicted, truth)
+```
+### enet plotting truth vs predicted
+
+these plots look nearly identical to the lm_log model.
+
+```{r enet_plot}
+if(show){
+
+ggplot(data = results_train, aes(x = truth, y = enet_predicted)) + #train
+       geom_hex() +
+       xlim(0,1000) + ylim(0,1000) +
+       geom_abline(color = "red") + 
+       ggtitle("ENET Model Train: Truth vs Predicted")
+ggplot(data = results_test, aes(x = truth, y = enet_predicted)) + #test
+       geom_hex() +
+       xlim(0,1000) + ylim(0,1000) +
+       geom_abline(color = "blue") + 
+       ggtitle("ENET Model Test: Truth vs Predicted")
+
+}
+
+```
+
+## lasso model
+
+### lasso making the model
+
+here we make the lasso model with an alpha of 1 and use the log_price variable. we can possibly just get some minimized amount of variables. here we will use both the lambda min and 1se. the lambda min is used less for regularization and just variable reduction because we don't face over-fitting in our regular linear model. with a model at lambda min the number of variables goes from 51 to 43 and then lambda 1se has 36 variables. 
+
+```{r lasso}
+lasso_mod <- cv.glmnet(log_price ~ . -price,
+                       data = listings_train,
+                       alpha = 1)
+
+if(show){
+  print(lasso_mod)
+  plot(lasso_mod)
+  
+  coefpath(lasso_mod)
+}
+```
+### lasso predictions
+
+because we are using both levels of lambda we make predictions for both levels and then put them in the training and testing results dataframe.
+
+```{r lasso_log_predictions_results}
+
+preds_train_lasso_1se <- predict(lasso_mod, s = lasso_mod$lambda.1se, listings_train, type = "response") %>% exp() %>% as.vector()
+preds_test_lasso_1se <- predict(lasso_mod, s = lasso_mod$lambda.1se, listings_test, type = "response") %>% exp() %>% as.vector()
+
+preds_train_lasso_min <- predict(lasso_mod, s = lasso_mod$lambda.min, listings_train, type = "response") %>% exp() %>% as.vector()
+preds_test_lasso_min <- predict(lasso_mod, s = lasso_mod$lambda.min, listings_test, type = "response") %>% exp() %>% as.vector()
+
+results_train$lasso_predicted_1se = preds_train_lasso_1se
+results_test$lasso_predicted_1se = preds_test_lasso_1se
+
+results_train$lasso_predicted_min = preds_train_lasso_min
+results_test$lasso_predicted_min = preds_test_lasso_min
+
+rm(preds_train_lasso_1se, preds_test_lasso_1se, preds_train_lasso_min, preds_test_lasso_min)
+
+```
+
+### lasso metrics
+
+here we take a look at the metrics. across all of the regularized models the error metrics have stayed nearly the same. even at lambda.1se for lasso the error stays about the same with it being a bit over-fit still. a lasso model with lambda 1se would be good since it cuts out a lot of variables and can increase interpretability.
+
+```{r lasso_log_metrics}
+metrics(results_train, lasso_predicted_1se, truth)
+metrics(results_test, lasso_predicted_1se, truth)
+
+metrics(results_train, lasso_predicted_min, truth)
+metrics(results_test, lasso_predicted_min, truth)
+```
+### lasso plotting truth vs predicted
+
+here we just plotted the testing plots. the plots look nearly identical to the other regularized plots
+```{r lasso_log_plot}
+if(show){
+
+ggplot(data = results_test, aes(x = truth, y = lasso_predicted_1se)) + 
+       geom_hex() +
+       xlim(0,1000) + ylim(0,1000) +
+       geom_abline(color = "blue") + 
+       ggtitle("Lasso1se Model Test: Truth vs Predicted")
+ggplot(data = results_test, aes(x = truth, y = lasso_predicted_min)) +
+       geom_hex() +
+       xlim(0,1000) + ylim(0,1000) +
+       geom_abline(color = "blue") + 
+       ggtitle("Lassomin Model Test: Truth vs Predicted")
+
+}
+
+```
+## random forests
+
+### rf model 
+
+here we modify the data to include a variable that says if it is luxury or not. we set this to $285 because that is in the last quartile for price. this is a binary variable set into a new dataframe as a factor. in our random forest we set the outcome to be the binary variable luxury and took away the price and log_price because if we used those that would be cheating. we set the number of variables to the standard variable count for random forests. also we set the number of trees to 60 because when it was higher that is where the error started to level off. we do a varImpPlot to show how important variables are in the prediction. specifically we set it to where it shows the mean decrease in accuracy or the % increase in MSE.
+
+```{r random_forest}
+listings_train_RF <- listings_train
+listings_test_RF <- listings_test
+
+listings_train_RF$luxury <- with(listings_train_RF, ifelse(price>285, 't','f' )) %>% as.factor()
+listings_test_RF$luxury <- with(listings_test_RF, ifelse(price>285, 't','f' )) %>% as.factor()
+
+RF_mod <- randomForest(luxury ~ . -price -log_price, 
+                       data = listings_train_RF,
+                       type = classification,
+                       mtry = sqrt(40),
+                       ntree = 60, 
+                       importance = TRUE)
+if(show) {
+  plot(RF_mod)
+  varImpPlot(RF_mod, main = "Variable Importance", type = 1)
+  importance(RF_mod)
+}
+```
+
+### rf predictions
+
+here we make some predictions with the model using the modified data. next we made a new data frame to use these new predictions against the truth.
+
+```{r random_forest_predictions}
+preds_train_RF <- predict(RF_mod, listings_train_RF)
+preds_test_RF <- predict(RF_mod, listings_test_RF)
+
+results_train_RF <- data.frame(
+  'predicted' = preds_train_RF,
+  'truth' = listings_train_RF$luxury
+  )
+
+results_test_RF <- data.frame(
+  'predicted' = preds_test_RF,
+  'truth' = listings_test_RF$luxury
+  )
+
+rm(preds_test_RF, preds_train_RF)
+```
+
+### rf true vs false
+
+here we make confusion matrices with how the predictions stack up against the actual truth. in the training model the accuracy is really really high. not sure how to extract the numbers from inside the table in the conf_mat object, so we manually inputted them. the accuracy for training is 0.9993038 and the accuracy for testing is 0.8771841. in testing this model is able to properly predict if a property is luxury. that means that 13% of the total predictions are wrong, accuracy is just being able to predict correctly, true or false. pretty good. the sensitivity or true positive rate is 0.999246 in training and  0.887297 in testing. This means that in testing the model is able to properly identify 88.7% of luxury properties. in specificity, or the ability to identify falses is 0.8378713 in the testing, which means that it can identiy 83.7% of the non-luxury properties.
+
+```{r}
+RF_train_conf <- conf_mat(results_train_RF,
+         truth = truth,
+         estimate = predicted)
+
+RF_test_conf <- conf_mat(results_test_RF,
+         truth = truth,
+         estimate = predicted)
+
+print(RF_train_conf)
+print(RF_test_conf)
+
+#train accuracy
+(11928 + 3862) / (11928 + 3862 + 9 + 2)
+#test accuracy
+(2787 + 677) / (2787 + 677 + 354 + 131)
+
+#train true positive rate - sensitivity
+(11928) / (11928 + 9)
+#test true positive rate - sensitivity
+(2787) / (2787 + 354)
+
+#train true negative rate - specificity
+(3862) / (3862 + 2)
+#test true negative rate - specificity
+(677) / (677 + 131)
+```
+
+## fin~
